@@ -1,25 +1,14 @@
 import React, { useState, useEffect, createContext, useContext, FC } from 'react';
+// FIX: The firebase V8 API surface is used in this file, but the installed SDK is likely V9 or newer. Using the 'compat' libraries provides a compatibility layer for the V8 API, resolving errors with types like `firebase.User` and `firebase.firestore`.
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/auth';
+import 'firebase/compat/firestore';
+import 'firebase/compat/storage';
 import { auth, db, storage, serverTimestamp } from './firebase';
-// FIX: Replaced named imports from 'firebase/auth' with a namespace import to resolve module loading errors.
-import * as firebaseAuth from 'firebase/auth';
-import {
-    doc,
-    setDoc,
-    getDoc,
-    updateDoc,
-    DocumentData
-} from 'firebase/firestore';
-import {
-    ref,
-    uploadBytes,
-    getDownloadURL
-} from 'firebase/storage';
 
-
-// --- 2. AUTHENTICATION CONTEXT ---
+// --- AUTHENTICATION CONTEXT ---
 interface AuthContextType {
-    // FIX: Using User type from firebaseAuth namespace.
-    currentUser: firebaseAuth.User | null;
+    currentUser: firebase.User | null;
     loading: boolean;
 }
 const AuthContext = createContext<AuthContextType>({ currentUser: null, loading: true });
@@ -27,13 +16,11 @@ const AuthContext = createContext<AuthContextType>({ currentUser: null, loading:
 export const useAuth = () => useContext(AuthContext);
 
 const AuthProvider: FC<{children: React.ReactNode}> = ({ children }) => {
-    // FIX: Using User type from firebaseAuth namespace.
-    const [currentUser, setCurrentUser] = useState<firebaseAuth.User | null>(null);
+    const [currentUser, setCurrentUser] = useState<firebase.User | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        // FIX: Using onAuthStateChanged from firebaseAuth namespace.
-        const unsubscribe = firebaseAuth.onAuthStateChanged(auth, user => {
+        const unsubscribe = auth.onAuthStateChanged(user => {
             setCurrentUser(user);
             setLoading(false);
         });
@@ -50,7 +37,7 @@ const AuthProvider: FC<{children: React.ReactNode}> = ({ children }) => {
 };
 
 
-// --- 3. COMPONENTS ---
+// --- COMPONENTS ---
 
 // --- Navbar Component ---
 const Navbar: FC<{ setPage: (page: string) => void, activePage: string }> = ({ setPage, activePage }) => {
@@ -58,8 +45,7 @@ const Navbar: FC<{ setPage: (page: string) => void, activePage: string }> = ({ s
     
     const handleLogout = async () => {
         try {
-            // FIX: Using signOut from firebaseAuth namespace.
-            await firebaseAuth.signOut(auth);
+            await auth.signOut();
             setPage('auth');
         } catch (error) {
             console.error("Failed to log out", error);
@@ -100,16 +86,14 @@ const AuthPage: FC = () => {
         
         try {
             if (isLogin) {
-                // FIX: Using signInWithEmailAndPassword from firebaseAuth namespace.
-                await firebaseAuth.signInWithEmailAndPassword(auth, email, password);
+                await auth.signInWithEmailAndPassword(email, password);
             } else {
-                // FIX: Using createUserWithEmailAndPassword from firebaseAuth namespace.
-                const userCredential = await firebaseAuth.createUserWithEmailAndPassword(auth, email, password);
+                const userCredential = await auth.createUserWithEmailAndPassword(email, password);
                 const user = userCredential.user;
                 
                 if (user) {
-                    const userDocRef = doc(db, "users", user.uid);
-                    await setDoc(userDocRef, {
+                    const userDocRef = db.collection("users").doc(user.uid);
+                    await userDocRef.set({
                         uid: user.uid,
                         name: name,
                         email: user.email,
@@ -165,9 +149,9 @@ const Dashboard: FC = () => {
     useEffect(() => {
         if (currentUser) {
             const fetchUserData = async () => {
-                const docRef = doc(db, 'users', currentUser.uid);
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
+                const docRef = db.collection('users').doc(currentUser.uid);
+                const docSnap = await docRef.get();
+                if (docSnap.exists) {
                     setUserName(docSnap.data()?.name);
                 }
             };
@@ -189,34 +173,33 @@ const Dashboard: FC = () => {
 // --- Profile Page Component ---
 const Profile: FC = () => {
     const { currentUser } = useAuth();
-    const [userData, setUserData] = useState<DocumentData | null>(null);
+    const [userData, setUserData] = useState<firebase.firestore.DocumentData | null>(null);
     const [newName, setNewName] = useState('');
     const [profilePic, setProfilePic] = useState<File | null>(null);
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
 
     useEffect(() => {
-        const fetchUserData = async () => {
-            if (currentUser) {
-                const docRef = doc(db, 'users', currentUser.uid);
-                const docSnap = await getDoc(docRef);
-                if (docSnap.exists()) {
-                    const data = docSnap.data();
-                    setUserData(data || null);
-                    setNewName(data?.name || '');
-                }
-                setLoading(false);
+        if (!currentUser) return;
+        
+        const docRef = db.collection('users').doc(currentUser.uid);
+        const unsubscribe = docRef.onSnapshot(doc => {
+            if (doc.exists) {
+                const data = doc.data();
+                setUserData(data || null);
+                setNewName(data?.name || '');
             }
-        };
-        fetchUserData();
+            setLoading(false);
+        });
+
+        return () => unsubscribe();
     }, [currentUser]);
 
     const handleNameUpdate = async (e: React.FormEvent) => {
         e.preventDefault();
         if (currentUser && newName.trim() !== '') {
-            const userDocRef = doc(db, 'users', currentUser.uid);
-            await updateDoc(userDocRef, { name: newName });
-            setUserData(prev => prev ? { ...prev, name: newName } : null);
+            const userDocRef = db.collection('users').doc(currentUser.uid);
+            await userDocRef.update({ name: newName });
             alert("Name updated successfully!");
         }
     };
@@ -224,14 +207,13 @@ const Profile: FC = () => {
     const handlePictureUpload = async (file: File) => {
         if (currentUser) {
             setUploading(true);
-            const storageRef = ref(storage, `profile-pictures/${currentUser.uid}`);
-            await uploadBytes(storageRef, file);
-            const photoURL = await getDownloadURL(storageRef);
+            const storageRef = storage.ref(`profile-pictures/${currentUser.uid}`);
+            await storageRef.put(file);
+            const photoURL = await storageRef.getDownloadURL();
             
-            const userDocRef = doc(db, 'users', currentUser.uid);
-            await updateDoc(userDocRef, { photoURL });
+            const userDocRef = db.collection('users').doc(currentUser.uid);
+            await userDocRef.update({ photoURL });
             
-            setUserData(prev => prev ? { ...prev, photoURL } : null);
             setUploading(false);
             setProfilePic(null);
             alert("Profile picture updated!");
@@ -290,7 +272,7 @@ const Profile: FC = () => {
 };
 
 
-// --- 4. MAIN APP ---
+// --- MAIN APP ---
 const AppContent: FC = () => {
     const { currentUser, loading } = useAuth();
     const [page, setPage] = useState('dashboard');
